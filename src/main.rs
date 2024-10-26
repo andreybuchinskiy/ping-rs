@@ -1,3 +1,4 @@
+#![feature(maybe_uninit_array_assume_init)]
 use clap::Parser;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io;
@@ -6,6 +7,9 @@ use std::net::ToSocketAddrs;
 use std::net::{IpAddr, SocketAddr};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use zerocopy::byteorder::network_endian;
+use zerocopy::{FromBytes, IntoBytes};
+use zerocopy_derive::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -17,39 +21,67 @@ struct Args {
     interval: f64,
 }
 
-fn create_icmp_echo_request(sequence_number: u16) -> Vec<u8> {
-    let mut packet = vec![0u8; 8];
-
-    packet[0] = 8;
-    packet[1] = 0;
-
-    packet[2] = 0;
-    packet[3] = 0;
-
-    packet[4] = (sequence_number >> 8) as u8;
-    packet[5] = (sequence_number & 0xFF) as u8;
-
-    packet[6] = (sequence_number >> 8) as u8;
-    packet[7] = (sequence_number & 0xFF) as u8;
-    let checksum: u16 = calculate_checksum(&packet);
-    packet[2] = (checksum >> 8) as u8;
-    packet[3] = (checksum & 0xFF) as u8;
-    packet
+#[derive(IntoBytes, KnownLayout, Immutable, Debug)]
+#[repr(C)]
+struct IcmpEchoRequest {
+    icmp_type: u8,
+    icmp_code: u8,
+    checksum: network_endian::U16,
+    identifier: network_endian::U16,
+    sequence_number: network_endian::U16,
 }
 
-fn calculate_checksum(packet: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
+#[derive(FromBytes, KnownLayout, Immutable, Debug)]
+#[repr(C)]
+struct Ipv4Packet {
+    ver_len_tos: network_endian::U16,
+    total_len: network_endian::U16,
+    identification: network_endian::U16,
+    flags_frag_offset: network_endian::U16,
+    ttl: u8,
+    protocol: u8,
+    checksum: network_endian::U16,
+    source_address: network_endian::U32,
+    destination_address: network_endian::U32,
+}
 
-    for i in (0..packet.len()).step_by(2) {
-        let word = u16::from_be_bytes([packet[i], *packet.get(i + 1).unwrap_or(&0)]);
-        sum = sum.wrapping_add(word as u32);
+impl IcmpEchoRequest {
+    fn new(icmp_type: u8, icmp_code: u8, identifier: network_endian::U16) -> Self {
+        let mut packet = Self {
+            icmp_type,
+            icmp_code,
+            checksum: 0.into(),
+            identifier,
+            sequence_number: 0.into(),
+        };
+        packet.calculate_checksum();
+        packet
     }
 
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
+    fn calculate_checksum(&mut self) {
+        self.checksum = 0.into();
+        let mut sum: u32 = 0;
+
+        for i in (0..self.as_bytes().len()).step_by(2) {
+            let word = u16::from_be_bytes([
+                self.as_bytes()[i],
+                *self.as_bytes().get(i + 1).unwrap_or(&0),
+            ]);
+            sum = sum.wrapping_add(word as u32);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        let checksum = !(sum as u16);
+        self.checksum = network_endian::U16::from(checksum);
     }
 
-    !(sum as u16)
+    fn increment_sequence(&mut self) {
+        self.sequence_number += 1;
+        self.calculate_checksum();
+    }
 }
 
 fn get_target_ip(destination: String) -> IpAddr {
@@ -75,21 +107,20 @@ fn main() -> io::Result<()> {
     }?;
 
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-    // match socket.set_header_included(true) {
-    //     Ok(_) => (),
-    //     Err(e) => panic!("Failed to set header included: {}", e),
-    // }
 
     let target_addr = SocketAddr::new(target_ip, 0);
 
-    println!("PING {} ({}) 0(28) bytes of data.", target_ip, target_ip);
-    let mut sequence_number = 1;
+    let mut packet = IcmpEchoRequest::new(8, 0, 0.into());
+    println!(
+        "PING {} ({}) 0({}) bytes of data.",
+        target_ip,
+        target_ip,
+        packet.as_bytes().len()
+    );
     let interval = Duration::from_secs_f64(args.interval);
     loop {
-        let packet = create_icmp_echo_request(sequence_number);
-
         let sent_time = Instant::now();
-        socket.send_to(&packet, &target_addr.into())?;
+        socket.send_to(packet.as_bytes(), &target_addr.into())?;
 
         let mut buffer = [MaybeUninit::<u8>::uninit(); 1024];
 
@@ -97,21 +128,22 @@ fn main() -> io::Result<()> {
             Ok((n, addr)) => {
                 let recv_time = Instant::now();
                 let rtt = recv_time - sent_time;
-                let ttl = unsafe { buffer[8].assume_init() };
+                let init_buffer = unsafe { &MaybeUninit::array_assume_init(buffer) };
+                let res = Ipv4Packet::ref_from_bytes(&init_buffer[0..20]).unwrap();
                 println!(
                     "{} bytes from {}: icmp_seq={} ttl={} time={:.3} ms",
                     n,
                     addr.as_socket().unwrap().ip(),
-                    sequence_number,
-                    ttl,
+                    packet.sequence_number,
+                    res.ttl,
                     rtt.as_secs_f64() * 1000.0
                 );
+                packet.increment_sequence();
             }
             Err(e) => {
                 println!("Failed to receive ICMP Echo Reply: {}", e);
             }
         }
-        sequence_number += 1;
         sleep(interval);
     }
 }
