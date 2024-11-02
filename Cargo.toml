@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
 clap_derive = "4.5.18"
+libc = "0.2.161"
 socket2 = { version = "0.5.7", features = ["all"] }
 zerocopy = "0.8.7"
 zerocopy-derive = "0.8.7"
