@@ -211,6 +211,7 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.5.8"
+source = "git+https://github.com/rust-lang/socket2#56e625efa4c85157636027823af1b1cc84e758f6"
 dependencies = [
  "libc",
  "windows-sys",
