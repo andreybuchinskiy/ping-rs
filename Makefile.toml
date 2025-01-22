@@ -1,0 +1,13 @@
+[tasks.run-dev]
+script = [
+  "cargo build",
+  "sudo setcap cap_net_admin,cap_net_raw=eip target/debug/ping-rs",
+  "./target/debug/ping-rs ${@}",
+]
+
+[tasks.run]
+script = [
+  "cargo build -r",
+  "sudo setcap cap_net_admin,cap_net_raw=eip target/release/ping-rs",
+  "./target/release/ping-rs ${@}",
+]
