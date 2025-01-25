@@ -1,25 +1,29 @@
 use crate::args;
 use crate::icmp::{IcmpType, Ipv4Packet};
 use crate::packet::Packet;
+use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
+use hickory_resolver::Resolver;
 use libc::{cmsghdr, CMSG_DATA};
 use socket2::{Domain, MaybeUninitSlice, MsgHdrMut, Protocol, Socket, Type};
 use std::io;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use zerocopy::FromBytes;
 
 pub fn send_ping(args: &args::Args) -> io::Result<()> {
-    let target_ip = get_target_ip(&args.destination);
+    let target_ip = get_target_ip(&args.destination, args.ipv6)?;
     let target_addr = SocketAddr::new(target_ip, 0);
-    let socket = match args.ipv6 {
-        true => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)),
-        false => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)),
-    }?;
-    let mut packet = match args.ipv6 {
-        true => Packet::new(IcmpType::V6, args.payload_len),
-        false => Packet::new(IcmpType::V4, args.payload_len),
+    let (socket, mut packet) = match target_ip {
+        IpAddr::V6(_) => (
+            Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?,
+            Packet::new(IcmpType::V6, args.payload_len),
+        ),
+        IpAddr::V4(_) => (
+            Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?,
+            Packet::new(IcmpType::V4, args.payload_len),
+        ),
     };
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
     if args.ipv6 {
@@ -86,16 +90,21 @@ fn ping(socket: &Socket, packet: &mut Packet, target_addr: SocketAddr) -> io::Re
     Ok(())
 }
 
-fn get_target_ip(destination: &String) -> IpAddr {
+fn get_target_ip(destination: &String, ipv6: bool) -> io::Result<IpAddr> {
     let target_ip: IpAddr = match destination.parse() {
         Ok(target_ip) => target_ip,
         Err(_) => {
-            let target_ip: IpAddr = match format!("{}:0", destination).to_socket_addrs() {
-                Ok(mut target_ip) => target_ip.next().unwrap().ip(),
-                Err(e) => panic!("Unable to get IP address for {}: {}", destination, e),
+            let mut resolver_opts = ResolverOpts::default();
+            match ipv6 {
+                false => resolver_opts.ip_strategy = LookupIpStrategy::Ipv4Only,
+                true => resolver_opts.ip_strategy = LookupIpStrategy::Ipv6Only,
             };
+            let resolver = Resolver::new(ResolverConfig::default(), resolver_opts)?;
+            let response = resolver.lookup_ip(destination)?;
+            let target_ip = response.iter().next().expect("No addresses returned");
+            println!("Found {} address for {}", target_ip, destination);
             target_ip
         }
     };
-    target_ip
+    Ok(target_ip)
 }
