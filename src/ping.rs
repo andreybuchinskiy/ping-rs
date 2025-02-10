@@ -1,8 +1,7 @@
 use crate::args;
+use crate::dns::{dns_query, QueryType};
 use crate::icmp::{IcmpType, Ipv4Packet};
 use crate::packet::Packet;
-use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
-use hickory_resolver::Resolver;
 use libc::{cmsghdr, CMSG_DATA};
 use socket2::{Domain, MaybeUninitSlice, MsgHdrMut, Protocol, Socket, Type};
 use std::io;
@@ -90,20 +89,20 @@ fn ping(socket: &Socket, packet: &mut Packet, target_addr: SocketAddr) -> io::Re
     Ok(())
 }
 
-fn get_target_ip(destination: &String, ipv6: bool) -> io::Result<IpAddr> {
+fn get_target_ip(destination: &str, ipv6: bool) -> io::Result<IpAddr> {
     let target_ip: IpAddr = match destination.parse() {
         Ok(target_ip) => target_ip,
         Err(_) => {
-            let mut resolver_opts = ResolverOpts::default();
-            match ipv6 {
-                false => resolver_opts.ip_strategy = LookupIpStrategy::Ipv4Only,
-                true => resolver_opts.ip_strategy = LookupIpStrategy::Ipv6Only,
+            let res = match ipv6 {
+                false => dns_query(destination, QueryType::A)?,
+                true => dns_query(destination, QueryType::Aaaa)?,
             };
-            let resolver = Resolver::new(ResolverConfig::default(), resolver_opts)?;
-            let response = resolver.lookup_ip(destination)?;
-            let target_ip = response.iter().next().expect("No addresses returned");
-            println!("Found {} address for {}", target_ip, destination);
-            target_ip
+
+            match res.answers.first().unwrap().answer {
+                crate::dns::Answer::Ipv4(x) => std::net::IpAddr::V4(x),
+                crate::dns::Answer::Ipv6(x) => std::net::IpAddr::V6(x),
+                _ => panic!("Failed to get an IP address"),
+            }
         }
     };
     Ok(target_ip)

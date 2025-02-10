@@ -2,6 +2,7 @@
 #![feature(maybe_uninit_slice)]
 
 mod args;
+mod dns;
 mod icmp;
 mod packet;
 mod ping;
